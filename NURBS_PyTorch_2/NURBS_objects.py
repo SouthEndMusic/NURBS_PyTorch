@@ -14,7 +14,7 @@ path.append(path_here)
 import torch
 import basis_functions
 
-from string import ascii_lowercase
+from string import ascii_lowercase, ascii_uppercase
 
 
 def Marsden(knot_vector):
@@ -66,8 +66,13 @@ class NURBS_object():
         self.basis_function_sets      = []
         self.control_point_coord_sets = []
         
-        self.einsum_string  = ",".join(f"a{s}" for s in ascii_lowercase[1:1+n_inputs])
-        self.einsum_string += "->a" + ascii_lowercase[1:1+n_inputs]
+        # For calculating the knot span products
+        # 'a' represents the number of input variables
+        # The uppercase letters represent the number of nonzero basis functions (degree + 1)
+        # The lowercase letters represent the different derivative orders
+        self.einsum_string  = ",".join(f"a{S}{s}" for S,s in zip(ascii_uppercase[1:1+n_inputs],
+                                                                 ascii_lowercase[1:1+n_inputs]))
+        self.einsum_string += "->a" + ascii_uppercase[1:1+n_inputs] + ascii_lowercase[1:1+n_inputs]
         
         # Basis function values for certain inputs can be stored in this dictionary
         # so that if you want to evaluate this NURBS object for the same inputs multiple
@@ -179,6 +184,9 @@ class NURBS_object():
                                                                 uncompress               = False))
                 
             if not to_memory is None:
+                
+                # !!!: Note that here the basis function values and not the basis function products are stored.
+                # This is a choice to do some more computational work per call in favour of saving memory.
                 self.basis_function_memory[to_memory] = basis_function_values
                 
         else:
@@ -202,7 +210,8 @@ class NURBS_object():
         # Shape: (len(inputs[.]), self.n_inputs, degree_1+1, degree_2+1, ..., degree_{self.n_inputs}+1)
         control_point_indices_per_input = control_point_indices_per_input + knot_span_product_indices_unsqueezed
         
-        # Shape: (len(inputs[.]), degree_1+1, degree_2+1, ..., degree_{self.n_inputs}+1)
+        # Shape: (len(inputs[.]), degree_1+1, degree_2+1, ..., degree_{self.n_inputs}+1,
+        #         derivative_orders[0]+1, ..., derivative_orders[self.n_inputs-1]+1)
         enumerator = torch.einsum(self.einsum_string,
                                   *[bfv[0] for bfv in basis_function_values])
         
@@ -219,7 +228,13 @@ class NURBS_object():
         # last dimension
         control_points_per_input = control_points_stacked.__getitem__(control_point_indices_per_input.split(1,dim=1)).squeeze(dim=1)
         
-        # Shape: (len(inputs[.]), self.n_outputs)
+        # Add dimensions to control_points_per_input for the sum below, corresponding to the
+        # various derivative order combinations
+        for i in range(self.n_inputs):
+            control_points_per_input = control_points_per_input.unsqueeze(dim=-2)
+        
+        # Shape: (len(inputs[.]), derivative_orders[0]+1, ..., derivative_orders[self.n_inputs-1]+1, 
+        #         self.n_outputs)
         # Note: see note above for size of last dimension
         out = torch.sum(enumerator.unsqueeze(dim=-1) * control_points_per_input,
                         axis = tuple(range(1,self.n_inputs+1)))
@@ -290,7 +305,7 @@ class Curve_2D(Curve):
     def normals(self,u):
         """Compute normal vectors to the curve."""
         
-        deriv_values = self(u, derivative_orders = [1])
+        deriv_values = self(u, derivative_orders = [1])[:,1]
         normals      = torch.zeros_like(deriv_values)
         
         normals[:,0] = -deriv_values[:,1]
@@ -320,6 +335,9 @@ class Surface_3D(NURBS_object):
         
         self._object_name = "surface_3D"
         
+    def __call__(self,*args,**kwargs):
+        return super().__call__(*args,**kwargs).squeeze()
+        
     # TODO: Implement getting triangle mesh
     # TODO: Implement getting surface area from triangle mesh
     # TODO: Implement getting normals using cross product of derivatives
@@ -330,79 +348,79 @@ if __name__ == "__main__":
     
     import matplotlib.pyplot as plt
     
-    # # 2D curve example
-    # C_2D = Curve_2D()
+    # 2D curve example
+    C_2D = Curve_2D()
     
-    # kv   = basis_functions.Knot_vector.make_open()
-    # bf   = basis_functions.Basis_functions(kv)
+    kv   = basis_functions.Knot_vector.make_open()
+    bf   = basis_functions.Basis_functions(kv)
     
-    # C_2D.set_parameters(
-    #                   basis_function_sets      = [bf],
-    #                   control_point_coord_sets = [torch.linspace(0,1,10),
-    #                                               torch.rand(C_2D.control_net_shape)])
+    C_2D.set_parameters(
+                      basis_function_sets      = [bf],
+                      control_point_coord_sets = [torch.linspace(0,1,10),
+                                                  torch.rand(C_2D.control_net_shape)])
     
-    # print(C_2D)
+    print(C_2D)
     
-    # u = torch.linspace(0,1, 100, device = C_2D.device)
+    u = torch.linspace(0,1, 100, device = C_2D.device)
     
-    # curve_2D = C_2D(u).cpu()
+    curve_2D = C_2D(u).cpu()
     
-    # fig_2D,ax_2D = plt.subplots(dpi = 100)
+    fig_2D,ax_2D = plt.subplots(dpi = 100)
     
-    # ax_2D.plot(curve_2D[:,0],
-    #             curve_2D[:,1],
-    #             label = f"length = {C_2D.get_length().item():.3f}")
+    ax_2D.plot(curve_2D[:,0],
+                curve_2D[:,1],
+                label = f"length = {C_2D.get_length().item():.3f}")
     
-    # ax_2D.plot(C_2D.control_point_coord_sets[0].cpu(),
-    #             C_2D.control_point_coord_sets[1].cpu(), 
-    #             marker = ".")
+    ax_2D.plot(C_2D.control_point_coord_sets[0].cpu(),
+                C_2D.control_point_coord_sets[1].cpu(), 
+                marker = ".")
     
-    # normals = C_2D.normals(u[::10]).cpu()
+    normals = C_2D.normals(u[::10]).cpu()
     
-    # ax_2D.quiver(curve_2D[::10,0],
-    #               curve_2D[::10,1],
-    #               normals[:,0],
-    #               normals[:,1],
-    #               label = "Normals")
+    ax_2D.quiver(curve_2D[::10,0],
+                  curve_2D[::10,1],
+                  normals[:,0],
+                  normals[:,1],
+                  label = "Normals")
     
-    # ax_2D.legend()
-    # ax_2D.set_aspect("equal")
+    ax_2D.legend()
+    ax_2D.set_aspect("equal")
     
-    # # 3D curve example
-    # n_control_points = 20
+    # 3D curve example
+    n_control_points = 20
     
-    # kv   = basis_functions.Knot_vector.make_open(n_control_points = n_control_points)
-    # bf   = basis_functions.Basis_functions(kv)
+    kv   = basis_functions.Knot_vector.make_open(n_control_points = n_control_points)
+    bf   = basis_functions.Basis_functions(kv)
     
-    # control_points_z = torch.linspace(0,1,n_control_points)
-    # control_points_x = control_points_z*torch.cos(20*control_points_z)
-    # control_points_y = control_points_z*torch.sin(20*control_points_z)
+    control_points_z = torch.linspace(0,1,n_control_points)
+    control_points_x = control_points_z*torch.cos(20*control_points_z)
+    control_points_y = control_points_z*torch.sin(20*control_points_z)
     
-    # C_3D = Curve_3D(n_control_points = n_control_points)
-    # C_3D.set_parameters(
-    #                   basis_function_sets      = [bf],
-    #                   control_point_coord_sets = [control_points_x,
-    #                                               control_points_y,
-    #                                               control_points_z])
+    C_3D = Curve_3D(n_control_points = n_control_points)
+    C_3D.set_parameters(
+                      basis_function_sets      = [bf],
+                      control_point_coord_sets = [control_points_x,
+                                                  control_points_y,
+                                                  control_points_z])
     
-    # print(C_3D)
+    print(C_3D)
     
-    # fig_3D = plt.figure(dpi = 100)
-    # ax_3D  = fig_3D.add_subplot(projection = "3d")
+    fig_3D = plt.figure(dpi = 100)
+    ax_3D  = fig_3D.add_subplot(projection = "3d")
     
-    # curve_3D = C_3D(u).cpu().numpy()
+    curve_3D = C_3D(u).cpu().numpy()
     
-    # ax_3D.plot(curve_3D[:,0],
-    #             curve_3D[:,1],
-    #             curve_3D[:,2],
-    #             label = f"length = {C_3D.get_length().item():.3f}")
+    ax_3D.plot(curve_3D[:,0],
+                curve_3D[:,1],
+                curve_3D[:,2],
+                label = f"length = {C_3D.get_length().item():.3f}")
     
-    # ax_3D.plot(C_3D.control_point_coord_sets[0].cpu().numpy(),
-    #             C_3D.control_point_coord_sets[1].cpu().numpy(),
-    #             C_3D.control_point_coord_sets[2].cpu().numpy(),
-    #             marker = ".")
+    ax_3D.plot(C_3D.control_point_coord_sets[0].cpu().numpy(),
+                C_3D.control_point_coord_sets[1].cpu().numpy(),
+                C_3D.control_point_coord_sets[2].cpu().numpy(),
+                marker = ".")
     
-    # ax_3D.legend()
+    ax_3D.legend()
     
     # 3D surface example
     n_control_points_1 = 15

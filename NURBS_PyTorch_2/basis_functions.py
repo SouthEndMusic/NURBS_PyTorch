@@ -239,39 +239,48 @@ class Basis_functions():
         
         # Recursively compute the basis function values for increasing
         # degrees
-        # TODO: Make it so that (optionally) all lower order derivative values are also returned?
-        values_prev_degree = torch.ones((len_u,1), device = self.device)
+        values_prev_degree = torch.ones((len_u,1,1), device = self.device)
         
         for current_degree in range(1,self.degree+1):
+            
+            n_derivative_order_cases = max(1, derivative_order + current_degree - self.degree + 1)
         
-            values_current_degree = torch.zeros((len_u,current_degree+1),
-                                                device = self.device)
+            # Shape: (len(u), current_degree+1, n_derivative_order_cases)
+            values_current_degree = torch.zeros((len_u,current_degree+1,n_derivative_order_cases),
+                                                 device = self.device)
             
-            if self.degree - current_degree < derivative_order:
-                part1 = (values_prev_degree *
-                    current_degree/self.knot_vector.knot_distances[knot_span_indices_shifted[:,self.degree-current_degree:self.degree],current_degree-1]
-                )
-                part2 = (values_prev_degree *
-                    current_degree/self.knot_vector.knot_distances[knot_span_indices_shifted[:,self.degree-current_degree:self.degree],current_degree-1]
-                )
-                
-            else:
-                part1 = (values_prev_degree *
-                    u_knot_diffs[:,self.degree-current_degree:self.degree]/self.knot_vector.knot_distances[knot_span_indices_shifted[:,self.degree-current_degree:self.degree],current_degree-1]
-                )
-                part2 = (values_prev_degree *
-                    u_knot_diffs[:,self.degree:self.degree+current_degree]/self.knot_vector.knot_distances[knot_span_indices_shifted[:,self.degree-current_degree:self.degree],current_degree-1]
-                )
+            # Shape: (len(u), current_degree)
+            denom = self.knot_vector.knot_distances[knot_span_indices_shifted[:,self.degree-current_degree:self.degree],current_degree-1]
             
+            # Shape of values_prev_degree: (len(u), current_degree, previous n_derivative_order_cases)
             
-            values_current_degree[:,1:]   = part1
-            values_current_degree[:,:-1] -= part2
+            # Shape: (len(u), current_degree, previous n_derivative_order_cases)
+            N_and_denoms = values_prev_degree / denom[:,:,None]
+            
+            # Shape: (len(u), current_degree, 2)
+            enums_nonderiv = torch.stack([u_knot_diffs[:,self.degree-current_degree:self.degree],
+                                          u_knot_diffs[:,self.degree:self.degree+current_degree]], dim = -1)
+            
+            # Shape: (len(u), current_degree, 2)
+            terms_nonderiv = N_and_denoms[:,:,0,None] * enums_nonderiv
+            
+            values_current_degree[:,1:, 0]  = terms_nonderiv[:,:,0]
+            values_current_degree[:,:-1,0] -= terms_nonderiv[:,:,1]
+            
+            if n_derivative_order_cases > 1:
+                terms_deriv = N_and_denoms * current_degree
+                            
+                values_current_degree[:,1:, 1:]  = terms_deriv
+                values_current_degree[:,:-1,1:] -= terms_deriv
     
             values_prev_degree = values_current_degree.clone()
             
             
         if uncompress:
-            out = self._uncompress_basis_function_values(values_prev_degree, knot_span_indices)
+            
+            out = torch.stack([self._uncompress_basis_function_values(values_prev_degree[:,:,i], knot_span_indices)
+                               for i in range(derivative_order+1)], dim = -1)
+            
         else:
             out = values_prev_degree
                         
@@ -303,43 +312,27 @@ if __name__ == "__main__":
     bf = Basis_functions(kv)
     print(bf)
     
-    fig,ax = plt.subplots(dpi = 100)
+    N       = 1000
+    u       = torch.linspace(0,1,N)
+    d_order = 2
     
-    ax.set_title(f"Basis functions of degree {bf.degree}")
+    basis_functions_eval = bf.eval_grid(n=N, derivative_order = d_order).cpu()
     
-    N = 1000
-    u = torch.linspace(0,1,N)
+    fig,axs = plt.subplots(d_order+1, dpi = 100)
     
-    basis_functions_eval = bf.eval_grid(n=N).cpu()
-    
-    for i in range(bf.n_basis_functions):
-        ax.plot(u, basis_functions_eval[:,i])
+    if d_order == 0:
+        axs = [axs]
         
-    ax.vlines(kv.knots.cpu(),0,1, color = "k", ls = ":")
-        
+    axs[0].vlines(kv.knots.cpu(), 0, 1, color = "k", ls = "--")
+    
+    fig.suptitle(f"Basis functions of degree {bf.degree}")
+    
+    for i,ax in enumerate(axs):
+        ax.set_title(r"$N^{(" + str(i) + r")}_{i," + str(kv.degree) + r"}$")
+        for j in range(bf.n_basis_functions):
+            ax.plot(u.cpu(), basis_functions_eval[:,j,i])
+            
     fig.tight_layout()
-    
-    
-    fig_d,ax_d = plt.subplots(dpi = 100)
-    
-    ax_d.set_title(f"Basis functions of degree {bf.degree} derivatives")
-    
-    basis_functions_eval_d = bf.eval_grid(n=N, derivative_order = 1).cpu()
-    
-    for i in range(bf.n_basis_functions):
-        ax_d.plot(u.cpu(), basis_functions_eval_d[:,i])
         
-    fig_d.tight_layout()
-        
-    # Second derivative test
-    fig_dd, ax_dd = plt.subplots(dpi = 100)
-    ax_dd.set_title(f"Basis functions of degree {bf.degree} second derivatives")
-    
-    basis_functions_eval_dd = bf.eval_grid(n=N, derivative_order = 2).cpu()
-    
-    for i in range(bf.n_basis_functions):
-        ax_dd.plot(u.cpu(), basis_functions_eval_dd[:,i])
-    
-    fig_dd.tight_layout()
-    
+
     
