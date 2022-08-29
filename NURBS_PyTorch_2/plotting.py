@@ -12,15 +12,24 @@ from dash import dcc, html
 import dash
 from dash.dependencies import Input, Output
 
-# TODO:
+# TODO: ...
+# - In the title, call the objects NURBS of weights are included, and show the weights
+#   in the control point colors
 # - Fix index error when selecting
 # - Look of control net: Have only the for movement selected control points be bright, unselected a bit brighter than now
 # - Obtain better size/shape of app/plot based on contents
 
 def plotter(obj,*args,**kwargs):
     
+    assert hasattr(obj, "_object_name"), \
+        "Object to plot must have \"_object_name\" attribute."
+    
     if obj._object_name == "curve_2D":
         return Curve_2D_interactor(obj,*args,**kwargs)
+    
+    elif obj._object_name == "surface_3D":
+        return Curve_3D_interactor(obj,*args,**kwargs)
+        
     
     else:
         raise TypeError(f"There is no plotter implementation for a NURBS object of type {obj._object_name}.")
@@ -36,8 +45,7 @@ class Curve_2D_interactor():
                  title               = None,
                  n_points_eval       = 100,
                  modify_figure       = None,
-                 interval            = False,
-                 interval_length     = 1000):
+                 graph_shape         = (500,500)):
         
         self.device        = curve.device
         self.curve         = curve
@@ -50,15 +58,12 @@ class Curve_2D_interactor():
         n_control_points = curve.control_net_shape[0]
         
         self.selection = torch.zeros(n_control_points,
-                                     device = curve.device)
+                                     device = curve.device,
+                                     dtype = torch.bool)
         
         layout_elems = [
             html.H1(f"Interactive B-spline curve of degree {degree}" if title is None else title),
             dcc.Graph(id='graph')]
-        
-        if interval:
-            layout_elems.append(dcc.Interval(id='interval', interval = interval_length,
-                         n_intervals = 0))
 
         self.app.layout = html.Div(layout_elems)
         
@@ -67,6 +72,7 @@ class Curve_2D_interactor():
         self.app.run_server(mode='inline')
         
         # Plot properties
+        self.graph_shape         = graph_shape
         self.curve_color         = curve_color
         self.control_point_color = control_point_color 
         
@@ -91,17 +97,17 @@ class Curve_2D_interactor():
         
     def create_figure(self):
         
-        #TODO: Use eval_grid (or even more clever: compute the basis function products only once since they
-        # do not change)
+        #TODO: Use eval_grid
         knots = self.curve.basis_function_sets[0].knot_vector.knots
         u     = torch.linspace(knots[0],
                                knots[-1],
-                              self.n_points_eval, device = self.curve.device)
+                              self.n_points_eval, device = self.device)
         
         with torch.no_grad():
             Eval = self.curve(u, to_memory = "for_plotting").cpu()
         
-        figure      = go.FigureWidget()
+        figure      = go.FigureWidget(layout = dict(width  = self.graph_shape[0],
+                                                    height = self.graph_shape[1]))
 
         figure.update_layout(dragmode = "select")
 
@@ -168,7 +174,10 @@ class Curve_2D_interactor():
 
             else:
                 
-                if 'selections' in data:                
+                if 'selections' in data: 
+                    if len(data['selections']) == 0:
+                        return dash.no_update
+                        
                     selection = data['selections'][0]
 
                     if 'type' in selection:
@@ -190,3 +199,233 @@ class Curve_2D_interactor():
                     return dash.no_update
 
             return [figure]
+        
+        
+        
+class Curve_3D_interactor():
+    
+    def __init__(self,
+                 surface,
+                 surface_color       = 'blue',
+                 surface_opacity     =  0.5,
+                 control_point_color = 'rgba(255,0,0,0.8)',
+                 control_point_size  = 3,
+                 title               = None,
+                 n_points_eval       = 100,
+                 modify_figure       = None,
+                 graph_shape         = (500,500),
+                 slider_r            = 1,
+                 cbar_range          = None,
+                 control_net         = True):
+        
+        self.device        = surface.device
+        self.surface       = surface
+        self.app           = JupyterDash(__name__)
+        self.n_points_eval = n_points_eval
+        self.modify_figure = modify_figure
+        
+        degrees           = tuple([bfs.degree for bfs in surface.basis_function_sets])
+        
+        self.selection = torch.zeros(surface.control_net_shape,
+                                     device = self.device,
+                                     dtype = torch.bool)
+        
+        layout_elems = [
+            html.H1(f"Interactive B-spline surface of degrees {degrees}" if title is None else title),
+            dcc.Graph(id='graph3d'),
+            dcc.Slider(-slider_r, slider_r, marks=None, value=0, id = 'slider',
+                       step = 2*slider_r/25, updatemode = 'drag'),
+            dcc.Graph(id='graph2d')]
+        
+        self.app.layout = html.Div(layout_elems)
+        
+        self.get_callback()
+        self.app.run_server(mode='inline')
+        
+        # Plot properties
+        self.control_net         = control_net
+        self.cbar_range          = cbar_range
+        self.prev_value_slider   = 0
+        self.graph_shape         = graph_shape
+        self.surface_opacity     = surface_opacity
+        self.surface_color       = surface_color
+        self.control_point_color = control_point_color
+        self.control_point_size  = control_point_size
+        
+        
+        
+    def update_selection(self,selection):
+        
+        box_data       = selection
+        self.box_min_x = min(box_data['x0'],box_data['x1'])
+        self.box_max_x = max(box_data['x0'],box_data['x1'])
+        self.box_min_y = min(box_data['y0'],box_data['y1'])
+        self.box_max_y = max(box_data['y0'],box_data['y1'])
+        
+        cp_x = self.surface.control_point_coord_sets[0]
+        cp_y = self.surface.control_point_coord_sets[1]
+        
+        selection_new = (cp_x >= self.box_min_x) & (cp_x < self.box_max_x) & \
+                         (cp_y >= self.box_min_y) & (cp_y < self.box_max_y)
+                         
+        selection_changed = ~(selection_new == self.selection).all()
+        self.selection    = selection_new
+        
+        if selection_changed:
+            self.control_points_selection_z = self.surface.control_point_coord_sets[2][self.selection].clone()
+    
+        return selection_changed
+        
+    def create_figures(self):
+        
+        with torch.no_grad():
+            Eval = self.surface.eval_grid(n=self.n_points_eval,
+                                          to_memory = 'for_grid').squeeze().cpu()
+            
+            X = Eval[:,:,0]
+            Y = Eval[:,:,1]
+            Z = Eval[:,:,2]
+            
+        figure2d = go.FigureWidget(layout = dict(width  = self.graph_shape[0],
+                                                 height = self.graph_shape[1]))
+            
+        figure3d = go.FigureWidget(layout = dict(width  = self.graph_shape[0],
+                                                 height = self.graph_shape[1]))
+        
+        
+        
+        figure2d.update_layout(dragmode = "select")
+        
+        # Adding surface
+        figure3d.add_surface(x = X,
+                             y = Y,
+                             z = Z,
+                             name = "B-spline surface",
+                             opacity = self.surface_opacity,
+                             colorscale = 'jet',
+                             cmin = self.cbar_range[0],
+                             cmax = self.cbar_range[1],
+                             )
+        
+        figure3d.update_traces(colorbar_len = 0.8)
+        
+        line_marker = dict(color='#0066FF', width=2)
+        
+        # Adding control net        
+        for i in range(self.surface.control_net_shape[0]):
+            
+            x = self.surface.control_point_coord_sets[0][i].cpu()
+            y = self.surface.control_point_coord_sets[1][i].cpu()
+            z = self.surface.control_point_coord_sets[2][i].cpu()
+            
+            if self.control_net:
+                figure3d.add_scatter3d(mode = "markers+lines",
+                                     x = x,
+                                     y = y,
+                                     z = z,
+                                     name   = "Control net",
+                                     marker = dict(size = self.control_point_size),
+                                     line   = line_marker,
+                                     showlegend = (i == 0))
+            
+            figure2d.add_scatter(mode = "markers+lines",
+                                 x = x,
+                                 y = y,
+                                 name = "Control net projection",
+                                 line = line_marker,
+                                 showlegend = (i == 0))
+            
+        for j in range(self.surface.control_net_shape[1]):
+            
+            x = self.surface.control_point_coord_sets[0][:,j].cpu()
+            y = self.surface.control_point_coord_sets[1][:,j].cpu()
+            z = self.surface.control_point_coord_sets[2][:,j].cpu()
+            
+            if self.control_net:
+                figure3d.add_scatter3d(mode = "markers+lines",
+                                     x = x,
+                                     y = y,
+                                     z = z,
+                                     name   = "Control net",
+                                     marker = dict(size = self.control_point_size),
+                                     line   = line_marker,
+                                     showlegend = False)
+            
+            figure2d.add_scatter(mode = "markers+lines",
+                                 x = x,
+                                 y = y,
+                                 name = "Control net projection",
+                                 line = line_marker,
+                                 showlegend = False)
+            
+        figure2d.update_yaxes(
+            scaleanchor = "x",
+            scaleratio = 1)
+        
+        return figure2d, figure3d
+    
+    
+    def update_figure3d(self,figure3d):
+        
+        with torch.no_grad():
+            Eval = self.surface.eval_grid(n = self.n_points_eval,
+                                          from_memory = 'for_grid').squeeze().cpu()                        
+
+        # Surface update
+        figure3d['data'][0]['z'] = Eval[:,:,2]
+        
+        control_points_z = self.surface.control_point_coord_sets[2].cpu()
+        
+        # Control net update
+        if self.control_net:
+        
+            for i in range(self.surface.control_net_shape[0]):
+                
+                z = control_points_z[i]
+                figure3d['data'][i+1]['z'] = z
+                
+            for j in range(self.surface.control_net_shape[1]):
+                
+                z = control_points_z[:,j]
+                figure3d['data'][j+self.surface.control_net_shape[0]+1]['z'] = z
+        
+    def get_callback(self):
+        
+        @self.app.callback(
+            [Output('graph2d', 'figure'), 
+             Output('graph3d', 'figure'),
+             Output('slider','value')],
+            [Input('graph2d', 'relayoutData'),
+             Input('slider', 'value'),
+             Input('graph2d', 'figure'),
+             Input('graph3d', 'figure')]
+        )
+        def callback(data,value_slider,figure2d,figure3d):
+            
+            if not figure3d:
+                
+                figure2d, figure3d = self.create_figures()
+                
+            else:
+                
+                if 'selections' in data:
+                    if len(data['selections']) == 0:
+                        return dash.no_update
+                     
+                    else:
+                        selection = data['selections'][0]
+    
+                        if 'type' in selection:
+                            if self.update_selection(selection):
+                                value_slider = 0
+                        
+                if value_slider != self.prev_value_slider:
+                    
+                    self.surface.control_point_coord_sets[2][self.selection] = \
+                        self.control_points_selection_z + value_slider
+                   
+                    self.update_figure3d(figure3d)
+                    self.prev_value_slider = value_slider
+                
+            return [figure2d,figure3d,value_slider]
+        

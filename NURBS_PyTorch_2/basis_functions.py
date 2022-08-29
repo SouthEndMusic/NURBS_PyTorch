@@ -5,6 +5,10 @@ Created on Sat Jul 30 13:57:26 2022
 @author: Bart de Koning
 """
 
+# TODO: ...
+# - Make method in knot vector class that returns a (n equispaced) grid of points in the knot vector range
+#   and use this everywhere where this is now done outside class
+
 # TODO: (possibly ever)
 # - Format docstrings for automatic documentation generation (with Sphinx)
 # - Create support for periodic knot vectors
@@ -119,6 +123,16 @@ class Knot_vector():
     
     
     
+    def get_linspace(self,
+                     n : int = 100):
+        
+        u = torch.linspace(self.knots[0],
+                           self.knots[-1],
+                           n, device = self.device)
+        return u
+    
+    
+    
     def get_knot_span_indices(self,u):
         
         if self.is_equispaced:
@@ -129,6 +143,9 @@ class Knot_vector():
             
         cumulative = torch.cat([torch.tensor([self.multiplicities[0]], device = self.device), 
                                 torch.cumsum(self.multiplicities,0)])
+        
+        if self.is_open:
+            cumulative[-1] -= self.degree+1
         
         return cumulative[knot_span_indices]
 
@@ -297,10 +314,8 @@ class Basis_functions():
                   n : int  = 100,
                   **kwargs):
         
-        return self(torch.linspace(self.knot_vector.knots[0],
-                                   self.knot_vector.knots[-1],n,
-                                   device = self.device),
-                    **kwargs)[0]
+        return self(self.knot_vector.get_linspace(n=n),
+                    **kwargs)
     
 
     
@@ -308,27 +323,33 @@ if __name__ == "__main__":
     
     import matplotlib.pyplot as plt
     
-    kv = Knot_vector.make_open(degree=2, mode = "random")
+    kv = Knot_vector.make_open(degree=3, mode = "random")
     bf = Basis_functions(kv)
     print(bf)
     
     N       = 1000
     u       = torch.linspace(0,1,N)
-    d_order = 2
+    d_order = 0
     
-    basis_functions_eval = bf.eval_grid(n=N, derivative_order = d_order).cpu()
+    basis_functions_eval = bf.eval_grid(n=N, derivative_order = d_order)[0].cpu()
     
     fig,axs = plt.subplots(d_order+1, dpi = 100)
     
     if d_order == 0:
         axs = [axs]
         
-    axs[0].vlines(kv.knots.cpu(), 0, 1, color = "k", ls = "--")
+    axs[0].vlines(kv.knots.cpu(), 0, 1, color = "k", ls = "--",
+                  label = 'knots')
+    axs[0].legend()
     
     fig.suptitle(f"Basis functions of degree {bf.degree}")
     
     for i,ax in enumerate(axs):
-        ax.set_title(r"$N^{(" + str(i) + r")}_{i," + str(kv.degree) + r"}$")
+        if d_order == 0:
+            ax.set_title(r"$N_{i," + str(kv.degree) + r"}$")
+        else:
+            ax.set_title(r"$N^{(" + str(i) + r")}_{i," + str(kv.degree) + r"}$")
+            
         for j in range(bf.n_basis_functions):
             ax.plot(u.cpu(), basis_functions_eval[:,j,i])
             

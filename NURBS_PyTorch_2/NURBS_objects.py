@@ -42,7 +42,7 @@ class NURBS_object():
                  device          = basis_functions.device_standard):
         """Base class for NURBS objects for any number of inputs and outputs."""
         
-        self._object_name = "NURBS_object"
+        self._object_name = "NURBS_object" # Overwritten in child classes
         
         self.device = device
         
@@ -70,9 +70,23 @@ class NURBS_object():
         # 'a' represents the number of input variables
         # The uppercase letters represent the number of nonzero basis functions (degree + 1)
         # The lowercase letters represent the different derivative orders
-        self.einsum_string  = ",".join(f"a{S}{s}" for S,s in zip(ascii_uppercase[1:1+n_inputs],
+        einsum_string_call  = ",".join(f"a{S}{s}" for S,s in zip(ascii_uppercase[1:1+n_inputs],
                                                                  ascii_lowercase[1:1+n_inputs]))
-        self.einsum_string += "->a" + ascii_uppercase[1:1+n_inputs] + ascii_lowercase[1:1+n_inputs]
+        einsum_string_call += "->a"
+        einsum_string_call += ascii_uppercase[1:1+n_inputs] + ascii_lowercase[1:1+n_inputs]
+        
+        self.einsum_string_call = einsum_string_call
+        
+        einsum_string_grid = ",".join(f"{a}{S}{s}" for a,S,s in zip(ascii_lowercase[13:13+n_inputs],
+                                                                    ascii_uppercase[:n_inputs],
+                                                                    ascii_lowercase[:n_inputs]))
+        
+        einsum_string_grid += "->"
+        einsum_string_grid += ascii_lowercase[13:13+n_inputs] + \
+                              ascii_uppercase[:n_inputs] + \
+                              ascii_lowercase[:n_inputs]
+                              
+        self.einsum_string_grid = einsum_string_grid
         
         # Basis function values for certain inputs can be stored in this dictionary
         # so that if you want to evaluate this NURBS object for the same inputs multiple
@@ -164,6 +178,7 @@ class NURBS_object():
         
         # TODO: Add weights incorporation (with and without derivatives)
         
+        # Create list of derivative orders 0 if list is not given
         if derivative_orders is None:
             derivative_orders = self.n_inputs*[0]
             
@@ -175,6 +190,7 @@ class NURBS_object():
             
             basis_function_values = []
             
+            # Compute basis function values
             for inputs,basis_function_set,derivative_order in zip(inputs_all, 
                                                                    self.basis_function_sets,
                                                                    derivative_orders):
@@ -191,28 +207,36 @@ class NURBS_object():
                 
         else:
             basis_function_values = self.basis_function_memory[from_memory]
-    
-    
-        # Shape: (len(inputs[.]),self.n_inputs)    
-        knot_span_product_indices = torch.stack([bfv[1] for bfv in basis_function_values],
-                                                dim = -1)
+        
+        
+        input_size = basis_function_values[0][0].shape[0]
+        
+        # Create Boolean array control_points_with support that indicates per input
+        # which control points are associated with basis functions that have this input
+        # in their support. Shape:
+        # (n_inputs, *self.control_net_shape)
+        for i,(bfv,bfs) in enumerate(zip(basis_function_values,
+                                         self.basis_function_sets)):
+            
+            control_indices_dim_i = torch.zeros(input_size,self.control_net_shape[i],
+                                                dtype = torch.bool, device = self.device)
+            
+            indics1 = torch.arange(input_size, device = self.device).tile(bfs.degree+1,1).T
+            indics2 = bfv[1][:,None] + torch.arange(-(bfs.degree+1),0, device = self.device)[None,:]
+            
+            control_indices_dim_i[indics1,indics2] = True
+            
+            if i == 0:
+                control_points_with_support = control_indices_dim_i
+            else:
+                for j in range(i):
+                    control_indices_dim_i = control_indices_dim_i.unsqueeze(dim=1)
+                    
+                control_points_with_support = control_points_with_support.unsqueeze(dim=-1) & \
+                                              control_indices_dim_i
              
-        # Shape: (1, self.n_inputs, degree_1+1, degree_2+1, ..., degree_{self.n_inputs}+1)
-        control_point_indices_per_input = torch.stack(torch.meshgrid([torch.arange(-(bfs.degree+1),0, device = self.device)
-                                                                      for bfs in self.basis_function_sets],
-                                                                      indexing = "ij")).unsqueeze(dim=0)
-        
-        knot_span_product_indices_unsqueezed = knot_span_product_indices.clone()
-        
-        for i in range(self.n_inputs):
-            knot_span_product_indices_unsqueezed = knot_span_product_indices_unsqueezed.unsqueeze(dim=-1)
-        
-        # Shape: (len(inputs[.]), self.n_inputs, degree_1+1, degree_2+1, ..., degree_{self.n_inputs}+1)
-        control_point_indices_per_input = control_point_indices_per_input + knot_span_product_indices_unsqueezed
-        
-        # Shape: (len(inputs[.]), degree_1+1, degree_2+1, ..., degree_{self.n_inputs}+1,
-        #         derivative_orders[0]+1, ..., derivative_orders[self.n_inputs-1]+1)
-        enumerator = torch.einsum(self.einsum_string,
+
+        enumerator = torch.einsum(self.einsum_string_call,
                                   *[bfv[0] for bfv in basis_function_values])
         
         if outputs_include == "all":       
@@ -222,11 +246,13 @@ class NURBS_object():
         else:
             control_points_stacked = torch.stack([self.control_point_coord_sets[i] for i in outputs_include],
                                                  dim = -1)
+
         
-        # Shape: (len(inputs[.]), degree_1+1, degree_2+1, ..., degree_{self.n_inputs}+1, self.n_outputs)
-        # Note: if outputs_include is specified the leength of this iterable determines the size of the
-        # last dimension
-        control_points_per_input = control_points_stacked.__getitem__(control_point_indices_per_input.split(1,dim=1)).squeeze(dim=1)
+        degrees_plus_1           = [bfs.degree+1 for bfs in self.basis_function_sets]
+        control_points_per_input = control_points_stacked.tile(input_size,
+                                                               *(1+self.n_inputs)*[1])[control_points_with_support].reshape(input_size,
+                                                                                                                            *degrees_plus_1,
+                                                                                                                            control_points_stacked.shape[-1])
         
         # Add dimensions to control_points_per_input for the sum below, corresponding to the
         # various derivative order combinations
@@ -240,23 +266,130 @@ class NURBS_object():
                         axis = tuple(range(1,self.n_inputs+1)))
         
         return out
-
     
-    def eval_grid(self,n=100):
+    
+    def eval_grid(self,n=100,
+                  derivative_orders = None,
+                  to_memory         = None,
+                  from_memory       = None,
+                  outputs_include   = 'all',
+                  construct_output  = True):
         
-        if not hasattr(n, "__iter__"):
+        if not hasattr(n, "__getitem__"):
             n = self.n_inputs*[n]
             
         basis_function_values = []
             
-        for n_,basis_function_set in zip(n,self.basis_function_sets):
-            basis_function_values.eval_grid(n = n_, return_knot_span_indices = True)
+        if derivative_orders is None:
+            derivative_orders = self.n_inputs*[0]
             
-        # TODO: construct output
+        if from_memory is None:
+            
+            basis_function_values = []
+            
+            for n_, basis_function_set,derivative_order in zip(n,
+                                                           self.basis_function_sets,
+                                                           derivative_orders):
+                
+                basis_function_values.append(basis_function_set.eval_grid(n=n_,
+                                                                          return_knot_span_indices = True,
+                                                                          derivative_order = derivative_order,
+                                                                          uncompress = False))
+                
+            if not to_memory is None:
+                
+                # !!!: Note that here the basis function values and not the basis function products are stored.
+                # This is a choice to do some more computational work per call in favour of saving memory.
+                self.basis_function_memory[to_memory] = basis_function_values
+                
+        else:
+            basis_function_values_all = self.basis_function_memory[from_memory]
+            basis_function_values     = []
+            
+            for i in range(self.n_inputs):        
+                basis_function_values.append([basis_function_values_all[i][0][:,:,:derivative_orders[i]+1],
+                                              basis_function_values_all[i][1]])
             
             
+        if not construct_output:
+            return
             
+        # Shape of basis_function_values:
+        # [(n[0],degree_1+1,derivative_orders[0]+1),
+        #  ...,
+        #  (n[self.n_inputs-1], degree_{self.n_inputs}+1,derivative_orders[self.n_inputs-1]+1)]
+        
+        # Shape: (n[0], n[1], ..., n[self.n_inputs-1], self.n_inputs)
+        # knot_span_product_indices = torch.stack(
+        #     torch.meshgrid([bfv[1] for bfv in basis_function_values], indexing = 'ij'),
+        #     dim = -1
+        # )
+        
+        for i,(bfv,bfs) in enumerate(zip(basis_function_values,
+                                         self.basis_function_sets)):
             
+            control_indices_dim_i = torch.zeros(n[i],self.control_net_shape[i],
+                                                dtype = torch.bool, device = self.device)
+            
+            indics1 = torch.arange(n[i], device = self.device).tile(bfs.degree+1,1).T
+            indics2 = bfv[1][:,None] + torch.arange(-(bfs.degree+1),0, device = self.device)[None,:]
+            
+            control_indices_dim_i[indics1,indics2] = True
+            
+            if i == 0:
+                control_points_with_support = control_indices_dim_i
+            else:
+                for j in range(i):
+                    control_indices_dim_i = control_indices_dim_i.unsqueeze(dim=0)
+                    control_indices_dim_i = control_indices_dim_i.unsqueeze(dim=j+2)
+                        
+                control_points_with_support = control_points_with_support.unsqueeze(dim=i)
+                control_points_with_support = control_points_with_support.unsqueeze(dim=-1)
+                    
+                control_points_with_support = control_points_with_support & \
+                                              control_indices_dim_i
+        
+        # Shape of knot_span_product_indices after unsqueeze:
+        # (n[0], n[1], ..., n[self.n_inputs-1], self.n_inputs,*self.n_inputs*[1])
+        # for i in range(self.n_inputs):
+        #     knot_span_product_indices = knot_span_product_indices.unsqueeze(dim = -1)
+            
+        # Shape: (*n, self.n_inputs, degree_1+1,...,degree_{self.n_inputs}+1,
+        # *derivative_orders)
+        enumerator = torch.einsum(self.einsum_string_grid,
+                                  *[bfv[0] for bfv in basis_function_values])
+        
+        if outputs_include == "all":       
+            control_points_stacked = torch.stack(self.control_point_coord_sets,
+                                                 dim = -1)
+            
+        else:
+            control_points_stacked = torch.stack([self.control_point_coord_sets[i] for i in outputs_include],
+                                                 dim = -1)
+        
+        # Shape: (*n, degree_1+1, degree_2+1, ..., degree_{self.n_inputs}+1, self.n_outputs)
+        # Note: if outputs_include is specified the length of this iterable determines the size of the
+        # last dimension
+        # control_points_per_input = control_points_stacked.__getitem__(control_point_indices_per_input.split(1,dim=self.n_inputs)).squeeze(dim=self.n_inputs)
+        degrees_plus_1           = [bfs.degree+1 for bfs in self.basis_function_sets]
+        control_points_per_input = control_points_stacked.expand(*n,
+                                                                 *control_points_stacked.shape)[control_points_with_support].reshape(*n,
+                                                                                                                            *degrees_plus_1,
+                                                                                                                            control_points_stacked.shape[-1])
+        
+        
+        # Add dimensions to control_points_per_input for the sum below, corresponding to the
+        # various derivative order combinations
+        for i in range(self.n_inputs):
+            control_points_per_input = control_points_per_input.unsqueeze(dim=-2)
+        
+        # Shape: (*n, derivative_orders[0]+1, ..., derivative_orders[self.n_inputs-1]+1, 
+        #         self.n_outputs)
+        # Note: see note above for size of last dimension
+        out = torch.sum(enumerator.unsqueeze(dim=-1) * control_points_per_input,
+                        axis = tuple(range(self.n_inputs,2*self.n_inputs)))
+        
+        return out
 
 
 class Curve(NURBS_object):
@@ -280,12 +413,7 @@ class Curve(NURBS_object):
         """Compute the length of this curve with a piece-wise linear approximation."""
         
         if values is None:
-            
-            # TODO: In the future use NURBS_object.eval_grid
-            u = torch.linspace(self.basis_function_sets[0].knot_vector.knots[0],
-                               self.basis_function_sets[0].knot_vector.knots[-1],
-                               n, device = self.device)
-            values = self(u)
+            values = self.eval_grid(n=n, **kwargs).squeeze()
             
         return (values[1:] - values[:-1]).norm(dim=1).sum()
         
@@ -337,92 +465,86 @@ class Surface_3D(NURBS_object):
         
     def __call__(self,*args,**kwargs):
         return super().__call__(*args,**kwargs).squeeze()
+    
+    def normals(self,u,v,
+                return_locs = False):
         
-    # TODO: Implement getting triangle mesh
-    # TODO: Implement getting surface area from triangle mesh
-    # TODO: Implement getting normals using cross product of derivatives
-            
+        values = self(u,v, derivative_orders = [1,1])
         
+        deriv_u = values[:,1,0]
+        deriv_v = values[:,0,1]
+        
+        normals  = torch.cross(deriv_u,deriv_v,dim=1)
+        normals /= normals.norm(dim=1,keepdim=True)
+        
+        if return_locs:
+            return values[:,0,0], normals
+        else:
+            return normals
+        
+        
+    def triangle_mesh(self,n,
+                      **kwargs):
+        
+        if not hasattr(n, "__getitem__"):
+            n = self.n_inputs*[n]
+        
+        # Number of faces and vertices
+        n_faces    = 2*(n[0]-1)*(n[1]-1)
+        n_vertices = n[0]*n[1]
+        
+        indices_0 = torch.arange(n[0], device = self.device).expand(n[1],n[0]).T
+        indices_1 = torch.arange(n[1], device = self.device).expand(*n)
+        indices   = n[0]*indices_1 + indices_0
+        
+        del indices_0, indices_1
+        
+        # Create array for the faces defined by vertex point index triples
+        faces = torch.zeros((n_faces,3), dtype = torch.int, device = self.device)
+        
+        # Array that defines one corner of every triangle on the surface
+        face_corners = indices[:-1,:-1].reshape(-1)
+        
+        # First half of the triangles
+        faces[:n_faces//2,0] = face_corners
+        faces[:n_faces//2,1] = face_corners + 1
+        faces[:n_faces//2,2] = face_corners + n[0]
 
+        del face_corners
+
+        # Second half of the triangles
+        faces[n_faces//2:,0] = faces[:n_faces//2,1]
+        faces[n_faces//2:,1] = faces[:n_faces//2,2] + 1
+        faces[n_faces//2:,2] = faces[:n_faces//2,2]
+        
+        vertices = self.eval_grid(n,**kwargs).squeeze().reshape(n_vertices,3)
+        
+        return vertices,faces
+    
+    def area(self,n,
+             return_mesh = False,
+             **kwargs):
+        """Approximate the surface area from a triangle mesh."""
+        
+        vertices, faces = self.triangle_mesh(n,**kwargs)
+        faces           = faces.long()
+        v1              = vertices[faces[:,1]] - vertices[faces[:,0]]
+        v2              = vertices[faces[:,2]] - vertices[faces[:,0]]
+        
+        area = torch.cross(v1,v2).norm(dim=1).sum()/2
+        
+        if return_mesh:
+            return vertices, faces, area
+        else:
+            return area
+
+    
+    
+    
 if __name__ == "__main__":
     
     import matplotlib.pyplot as plt
     
-    # 2D curve example
-    C_2D = Curve_2D()
-    
-    kv   = basis_functions.Knot_vector.make_open()
-    bf   = basis_functions.Basis_functions(kv)
-    
-    C_2D.set_parameters(
-                      basis_function_sets      = [bf],
-                      control_point_coord_sets = [torch.linspace(0,1,10),
-                                                  torch.rand(C_2D.control_net_shape)])
-    
-    print(C_2D)
-    
-    u = torch.linspace(0,1, 100, device = C_2D.device)
-    
-    curve_2D = C_2D(u).cpu()
-    
-    fig_2D,ax_2D = plt.subplots(dpi = 100)
-    
-    ax_2D.plot(curve_2D[:,0],
-                curve_2D[:,1],
-                label = f"length = {C_2D.get_length().item():.3f}")
-    
-    ax_2D.plot(C_2D.control_point_coord_sets[0].cpu(),
-                C_2D.control_point_coord_sets[1].cpu(), 
-                marker = ".")
-    
-    normals = C_2D.normals(u[::10]).cpu()
-    
-    ax_2D.quiver(curve_2D[::10,0],
-                  curve_2D[::10,1],
-                  normals[:,0],
-                  normals[:,1],
-                  label = "Normals")
-    
-    ax_2D.legend()
-    ax_2D.set_aspect("equal")
-    
-    # 3D curve example
-    n_control_points = 20
-    
-    kv   = basis_functions.Knot_vector.make_open(n_control_points = n_control_points)
-    bf   = basis_functions.Basis_functions(kv)
-    
-    control_points_z = torch.linspace(0,1,n_control_points)
-    control_points_x = control_points_z*torch.cos(20*control_points_z)
-    control_points_y = control_points_z*torch.sin(20*control_points_z)
-    
-    C_3D = Curve_3D(n_control_points = n_control_points)
-    C_3D.set_parameters(
-                      basis_function_sets      = [bf],
-                      control_point_coord_sets = [control_points_x,
-                                                  control_points_y,
-                                                  control_points_z])
-    
-    print(C_3D)
-    
-    fig_3D = plt.figure(dpi = 100)
-    ax_3D  = fig_3D.add_subplot(projection = "3d")
-    
-    curve_3D = C_3D(u).cpu().numpy()
-    
-    ax_3D.plot(curve_3D[:,0],
-                curve_3D[:,1],
-                curve_3D[:,2],
-                label = f"length = {C_3D.get_length().item():.3f}")
-    
-    ax_3D.plot(C_3D.control_point_coord_sets[0].cpu().numpy(),
-                C_3D.control_point_coord_sets[1].cpu().numpy(),
-                C_3D.control_point_coord_sets[2].cpu().numpy(),
-                marker = ".")
-    
-    ax_3D.legend()
-    
-    # 3D surface example
     n_control_points_1 = 15
     n_control_points_2 = 25
     
@@ -456,27 +578,34 @@ if __name__ == "__main__":
     
     print(S_3D)
     
-    u = torch.linspace(0,1, 100, device = S_3D.device)
-    v = u.clone()
+    surface_3D = S_3D.eval_grid().squeeze().cpu()
     
-    U,V = torch.meshgrid(u,v, indexing = 'ij')
+    fig          = plt.figure(dpi = 100)
+    ax_eval_grid = fig.add_subplot(121,projection = "3d")
     
-    surface_3D = S_3D(U.reshape(-1),
-                      V.reshape(-1)).cpu().numpy()
+    ax_eval_grid.plot_surface(surface_3D[:,:,0],
+                              surface_3D[:,:,1],
+                              surface_3D[:,:,2])
     
-    fig_3D = plt.figure(dpi = 100)
-    ax_3D  = fig_3D.add_subplot(projection = "3d")
+    ax_eval_grid.plot_wireframe(control_points_x.numpy(),
+                                control_points_y.numpy(),
+                                control_points_z.numpy(),
+                                color = "C1")
     
-    ax_3D.plot_surface(surface_3D[:,0].reshape(100,100),
-                       surface_3D[:,1].reshape(100,100),
-                       surface_3D[:,2].reshape(100,100))
+    N = 100
+    u    = torch.linspace(0,1,N, device = S_3D.device)
+    v    = torch.linspace(0,1,N, device = S_3D.device)
+    u,v  = torch.meshgrid(u,v, indexing = 'ij')
+    u    = u.reshape(-1)
+    v    = v.reshape(-1)
+    locs = S_3D(u,v).reshape(N,N,3).cpu()
     
-    ax_3D.plot_wireframe(control_points_x.numpy(),
-                         control_points_y.numpy(),
-                         control_points_z.numpy(),
-                         color = "C1")
+    ax_call = fig.add_subplot(122, projection = "3d")
     
+    ax_call.plot_surface(locs[:,:,0],
+                         locs[:,:,1],
+                         locs[:,:,2])
     
+    S_3D.triangle_mesh((50,60))
     
-        
-    
+
