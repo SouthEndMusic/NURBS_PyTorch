@@ -318,12 +318,7 @@ class NURBS_object():
         # [(n[0],degree_1+1,derivative_orders[0]+1),
         #  ...,
         #  (n[self.n_inputs-1], degree_{self.n_inputs}+1,derivative_orders[self.n_inputs-1]+1)]
-        
-        # Shape: (n[0], n[1], ..., n[self.n_inputs-1], self.n_inputs)
-        # knot_span_product_indices = torch.stack(
-        #     torch.meshgrid([bfv[1] for bfv in basis_function_values], indexing = 'ij'),
-        #     dim = -1
-        # )
+
         
         for i,(bfv,bfs) in enumerate(zip(basis_function_values,
                                          self.basis_function_sets)):
