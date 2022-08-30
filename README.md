@@ -15,6 +15,11 @@ The main differences between the approach presented here and PINNs are:
 - Therefore the solution approximation is not evaluated by evaluating the neural network but by evaluating the NURBS object.
 - Derivatives of the NURBS object are hardcoded efficiently, so that no backpropagation is needed to obtain these. Therefore backpropagation has to occur only once for an optimization iteration (also for higher derivative orders in the DE), from the loss to the neural network parameters.
 
+# To do
+
+- Implement derivatives of NURBS objects with weights
+- Add surface area minimization example
+
 # Disclaimer
 
 I do not claim that this code is correct or reliable, please check it against an established B-spline/NURBS implementation for your application.
