@@ -170,6 +170,7 @@ class NURBS_object():
                  derivative_orders = None,
                  to_memory         = None,
                  from_memory       = None,
+                 construct_output  = True,
                  outputs_include   = "all"):
         """
         Evaluate the NURBS_object as a function.
@@ -207,6 +208,10 @@ class NURBS_object():
                 
         else:
             basis_function_values = self.basis_function_memory[from_memory]
+         
+            
+        if not construct_output:
+            return
         
         
         input_size = basis_function_values[0][0].shape[0]
@@ -254,6 +259,18 @@ class NURBS_object():
                                                                                                                             *degrees_plus_1,
                                                                                                                             control_points_stacked.shape[-1])
         
+        if self.include_weights:
+            
+            if (torch.tensor(derivative_orders) != 0).sum() > 0:
+                raise NotImplementedError("Derivatives of NURBS objects with weights are not implemented yet.")
+            
+            weights_per_input = self.weights.tile(input_size, *self.n_inputs*[1])[control_points_with_support].reshape(input_size,
+                                                                                                                       *degrees_plus_1,
+                                                                                                                       *[o+1 for o in derivative_orders])
+            
+            enumerator *= weights_per_input
+            
+                                                                                                                            
         # Add dimensions to control_points_per_input for the sum below, corresponding to the
         # various derivative order combinations
         for i in range(self.n_inputs):
@@ -264,6 +281,9 @@ class NURBS_object():
         # Note: see note above for size of last dimension
         out = torch.sum(enumerator.unsqueeze(dim=-1) * control_points_per_input,
                         axis = tuple(range(1,self.n_inputs+1)))
+        
+        if self.include_weights:
+            out /= enumerator.sum(axis = tuple(range(1,self.n_inputs+1))).unsqueeze(dim=-1)
         
         return out
     
@@ -391,12 +411,14 @@ class Curve(NURBS_object):
     
     def __init__(self,
                  n_control_points = 10,
-                 n_outputs        = 2):
+                 n_outputs        = 2,
+                 **kwargs):
         """NURBS_object for curves with an arbitrary number of outputs."""
         
         super().__init__((n_control_points,),
                          n_inputs  = 1,
-                         n_outputs = n_outputs)
+                         n_outputs = n_outputs,
+                         **kwargs)
         
     def __call__(self,*args,**kwargs):
         return super().__call__(*args,**kwargs).squeeze()
@@ -540,67 +562,67 @@ if __name__ == "__main__":
     
     import matplotlib.pyplot as plt
     
-    n_control_points_1 = 15
-    n_control_points_2 = 25
+    # n_control_points_1 = 15
+    # n_control_points_2 = 25
     
-    degree_1 = 4
-    degree_2 = 6
+    # degree_1 = 4
+    # degree_2 = 6
     
-    kv_1 = basis_functions.Knot_vector.make_open(n_control_points = n_control_points_1,
-                                                 degree           = degree_1)
-    bf_1 = basis_functions.Basis_functions(kv_1)
+    # kv_1 = basis_functions.Knot_vector.make_open(n_control_points = n_control_points_1,
+    #                                              degree           = degree_1)
+    # bf_1 = basis_functions.Basis_functions(kv_1)
     
-    kv_2 = basis_functions.Knot_vector.make_open(n_control_points = n_control_points_2,
-                                                 degree           = degree_2)
-    bf_2 = basis_functions.Basis_functions(kv_2)
+    # kv_2 = basis_functions.Knot_vector.make_open(n_control_points = n_control_points_2,
+    #                                              degree           = degree_2)
+    # bf_2 = basis_functions.Basis_functions(kv_2)
     
-    S_3D = Surface_3D(control_net_shape = (n_control_points_1,
-                                           n_control_points_2))
+    # S_3D = Surface_3D(control_net_shape = (n_control_points_1,
+    #                                        n_control_points_2))
     
-    control_points_x = torch.linspace(-1,1, n_control_points_1)
-    control_points_y = torch.linspace(-1,1, n_control_points_2)
+    # control_points_x = torch.linspace(-1,1, n_control_points_1)
+    # control_points_y = torch.linspace(-1,1, n_control_points_2)
     
-    control_points_x, control_points_y = torch.meshgrid(control_points_x,
-                                                        control_points_y,
-                                                        indexing = 'ij')
+    # control_points_x, control_points_y = torch.meshgrid(control_points_x,
+    #                                                     control_points_y,
+    #                                                     indexing = 'ij')
     
-    control_points_z = control_points_x**2 -control_points_y**2
+    # control_points_z = control_points_x**2 -control_points_y**2
     
-    S_3D.set_parameters(basis_function_sets      = [bf_1,bf_2],
-                        control_point_coord_sets = [control_points_x,
-                                                    control_points_y,
-                                                    control_points_z])
+    # S_3D.set_parameters(basis_function_sets      = [bf_1,bf_2],
+    #                     control_point_coord_sets = [control_points_x,
+    #                                                 control_points_y,
+    #                                                 control_points_z])
     
-    print(S_3D)
+    # print(S_3D)
     
-    surface_3D = S_3D.eval_grid().squeeze().cpu()
+    # surface_3D = S_3D.eval_grid().squeeze().cpu()
     
-    fig          = plt.figure(dpi = 100)
-    ax_eval_grid = fig.add_subplot(121,projection = "3d")
+    # fig          = plt.figure(dpi = 100)
+    # ax_eval_grid = fig.add_subplot(121,projection = "3d")
     
-    ax_eval_grid.plot_surface(surface_3D[:,:,0],
-                              surface_3D[:,:,1],
-                              surface_3D[:,:,2])
+    # ax_eval_grid.plot_surface(surface_3D[:,:,0],
+    #                           surface_3D[:,:,1],
+    #                           surface_3D[:,:,2])
     
-    ax_eval_grid.plot_wireframe(control_points_x.numpy(),
-                                control_points_y.numpy(),
-                                control_points_z.numpy(),
-                                color = "C1")
+    # ax_eval_grid.plot_wireframe(control_points_x.numpy(),
+    #                             control_points_y.numpy(),
+    #                             control_points_z.numpy(),
+    #                             color = "C1")
     
-    N = 100
-    u    = torch.linspace(0,1,N, device = S_3D.device)
-    v    = torch.linspace(0,1,N, device = S_3D.device)
-    u,v  = torch.meshgrid(u,v, indexing = 'ij')
-    u    = u.reshape(-1)
-    v    = v.reshape(-1)
-    locs = S_3D(u,v).reshape(N,N,3).cpu()
+    # N = 100
+    # u    = torch.linspace(0,1,N, device = S_3D.device)
+    # v    = torch.linspace(0,1,N, device = S_3D.device)
+    # u,v  = torch.meshgrid(u,v, indexing = 'ij')
+    # u    = u.reshape(-1)
+    # v    = v.reshape(-1)
+    # locs = S_3D(u,v).reshape(N,N,3).cpu()
     
-    ax_call = fig.add_subplot(122, projection = "3d")
+    # ax_call = fig.add_subplot(122, projection = "3d")
     
-    ax_call.plot_surface(locs[:,:,0],
-                         locs[:,:,1],
-                         locs[:,:,2])
+    # ax_call.plot_surface(locs[:,:,0],
+    #                      locs[:,:,1],
+    #                      locs[:,:,2])
     
-    S_3D.triangle_mesh((50,60))
+    # S_3D.triangle_mesh((50,60))
     
 

@@ -62,7 +62,7 @@ class Knot_vector():
         self.knots = knots
         
         if multiplicities is None:
-            self.multiplicities = torch.ones_like(knots, dtype = torch.uint32)
+            self.multiplicities = torch.ones_like(knots, dtype = torch.int32)
         else:
             self.multiplicities = multiplicities
             
