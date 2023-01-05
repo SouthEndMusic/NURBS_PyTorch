@@ -22,7 +22,6 @@ device_standard           = torch.device("cuda:0") if torch.cuda.is_available() 
                              else torch.device("cpu")
 param_min_standard        = 0
 param_max_standard        = 1
-float_type                = torch.float32 # !!!: Not used
 
 
 def description_creator(prop_dict, object_name = ""):
@@ -54,6 +53,7 @@ class Knot_vector():
         self.is_open       = is_open
         self.is_equispaced = is_equispaced
         self.degree        = degree
+        self.precision     = torch.float32
         
         # Check whether vector consists of nondecreasing values
         assert (knots.sort().values == knots).all()
@@ -65,9 +65,6 @@ class Knot_vector():
             self.multiplicities = torch.ones_like(knots, dtype = torch.int32)
         else:
             self.multiplicities = multiplicities
-            
-        if is_equispaced:
-            self.knot_span_len = knots[1] - knots[0]
             
         self.update_knot_vector_full()
             
@@ -107,6 +104,9 @@ class Knot_vector():
         
         for i in range(self.degree):
             self.knot_distances[:,i] += self.vector_full[i+1:i+2+self.n_basis_functions]
+            
+        if self.is_equispaced:
+            self.knot_span_len = self.knots[1] - self.knots[0]
         
     
     def __getitem__(self,x):
@@ -128,7 +128,8 @@ class Knot_vector():
         
         u = torch.linspace(self.knots[0],
                            self.knots[-1],
-                           n, device = self.device)
+                           n, device = self.device,
+                           dtype = self.precision)
         return u
     
     
@@ -156,12 +157,17 @@ class Knot_vector():
                   device           = device_standard,
                   param_min        = param_min_standard,
                   param_max        = param_max_standard,
+                  knots            = None,
                   mode             = "equispaced"):
         """Create an open and equispaced knot_vector:
             [param_min, ...., param_min, <linear from param_min to param_max>, param_max,...,param_max].
             param_min and param_max are repeated degree+1 times."""
+        
+        if not knots is None:
+            assert len(knots) == n_control_points - degree + 1
+            knots = knots.to(device)
             
-        if mode == "equispaced":
+        elif mode == "equispaced":
             knots = torch.linspace(param_min,param_max, n_control_points - degree + 1,
                                    device = device)
             
@@ -175,7 +181,7 @@ class Knot_vector():
             knots  = (csum-csum.min())*(param_max-param_min)/(csum.max()-csum.min()) + param_min
             
         else:
-            raise ValueError(f"\"{mode}\" is not a valid open knot vector creation mode.")
+            raise ValueError(f"\"{mode}\" is not a valid open knot vector creation mode nor where knots provided.")
         
         multiplicities = torch.ones_like(knots, dtype = torch.int32,
                                          device = device)
@@ -216,7 +222,8 @@ class Basis_functions():
         other basis functions (mainly useful for plotting the basis functions)."""
         
         values_uncompressed = torch.zeros((len(values),self.n_basis_functions),
-                                           device = self.device)
+                                           device = self.device,
+                                           dtype = self.knot_vector.precision)
         
         u_indics = torch.arange(len(values), device = self.device)
 
@@ -256,7 +263,8 @@ class Basis_functions():
         
         # Recursively compute the basis function values for increasing
         # degrees
-        values_prev_degree = torch.ones((len_u,1,1), device = self.device)
+        values_prev_degree = torch.ones((len_u,1,1), device = self.device,
+                                        dtype = self.knot_vector.precision)
         
         for current_degree in range(1,self.degree+1):
             
@@ -264,7 +272,7 @@ class Basis_functions():
         
             # Shape: (len(u), current_degree+1, n_derivative_order_cases)
             values_current_degree = torch.zeros((len_u,current_degree+1,n_derivative_order_cases),
-                                                 device = self.device)
+                                                 device = self.device, dtype = self.knot_vector.precision)
             
             # Shape: (len(u), current_degree)
             denom = self.knot_vector.knot_distances[knot_span_indices_shifted[:,self.degree-current_degree:self.degree],current_degree-1]

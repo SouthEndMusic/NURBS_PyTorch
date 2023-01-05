@@ -46,6 +46,9 @@ class NURBS_object():
         
         self.device = device
         
+        # Data type of outputs
+        self.precision = torch.float32
+        
         # If True, this is a NURBS object, otherwise it is a B-spline object
         self.include_weights = include_weights
         
@@ -109,6 +112,22 @@ class NURBS_object():
     def __str__(self):
         return basis_functions.description_creator(self.get_property_dict(),
                                                    object_name = self._object_name)
+    
+    
+    def set_standard_basis_functions(self,
+                                     degrees = 3):
+        
+        if not hasattr(degrees, "__getitem__"):
+            degrees = self.n_inputs*[degrees]
+        
+        basis_function_sets = []
+        
+        for s,d in zip(self.control_net_shape,degrees):
+            
+            kv = basis_functions.Knot_vector.make_open(n_control_points = s, degree = d)
+            basis_function_sets.append(basis_functions.Basis_functions(kv))
+            
+        self.set_parameters(basis_function_sets = basis_function_sets)
         
         
     def set_parameters(self,
@@ -118,7 +137,7 @@ class NURBS_object():
         """
         Weights             : torch.Tensor of shape self.control_net_shape
         basis_function_sets : iterable of basis_functions.Basis_functions agreeing with self.control_net_shape
-        control_point_coords: iterable of length self.n_outputs with torch.Tensor of shape self.control_net_size4
+        control_point_coords: iterable of length self.n_outputs with torch.Tensor of shape self.control_net_size
         """
         
         if not weights is None:
@@ -327,7 +346,7 @@ class NURBS_object():
             basis_function_values_all = self.basis_function_memory[from_memory]
             basis_function_values     = []
             
-            for i in range(self.n_inputs):        
+            for i in range(self.n_inputs):
                 basis_function_values.append([basis_function_values_all[i][0][:,:,:derivative_orders[i]+1],
                                               basis_function_values_all[i][1]])
             
@@ -423,8 +442,108 @@ class NURBS_object():
             out /= enumerator.sum(axis =tuple(range(self.n_inputs,2*self.n_inputs))).unsqueeze(dim=-1)
         
         return out
+    
+    
+    def set_precision(self, dtype = torch.float64):
+        
+        for bfs in self.basis_function_sets:
+            knot_vector           = bfs.knot_vector
+            knot_vector.knots     = knot_vector.knots.type(dtype)
+            knot_vector.precision = dtype
+            
+            knot_vector.update_knot_vector_full()
+            
+        for i,cpcs in enumerate(self.control_point_coord_sets):
+            self.control_point_coord_sets[i] = cpcs.type(dtype)
+            
+        if self.include_weights:
+            self.weights = self.weights.type(dtype)
+            
+        self.precision = dtype
+        
+        
+    def to_npz(self, filename):
+        
+        import numpy as np
+        
+        data_dict = dict(n_inputs_outputs = np.array([self.n_inputs,self.n_outputs]),
+                         degrees          = [],
+                         is_open          = [],
+                         is_equispaced    = [])
+        
+        for i,bfs in enumerate(self.basis_function_sets):
+            knot_vector = bfs.knot_vector
+            
+            data_dict["degrees"].append(bfs.degree)
+            data_dict["is_open"].append(knot_vector.is_open)
+            data_dict["is_equispaced"].append(knot_vector.is_equispaced)
+            
+            data_dict[f"knots_{i}"] = knot_vector.knots.detach().cpu().numpy()
+            data_dict[f"mults_{i}"] = knot_vector.multiplicities.detach().cpu().numpy()
+            
+        if self.include_weights:
+            data_dict["weights"] = self.weights.detach().cpu().numpy()
+            
+        data_dict["control_points"] = torch.stack(self.control_point_coord_sets).detach().cpu().numpy()
+        data_dict["name"]           = np.array([self._object_name])
+        
+        with open(filename, 'wb') as f:
+            np.savez(f,**data_dict)
+            
+    
+    @staticmethod
+    def from_npz(filename, 
+                 device = None):
+        
+        if device is None:
+            device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
+        
+        import numpy as np
+        
+        with open(filename, 'rb') as f:
+            data_dict = np.load(f)
+            
+            control_net_shape = data_dict["control_points"].shape[1:]
+            include_weights   = ("weights" in data_dict)
 
 
+            NO = NURBS_object(control_net_shape,
+                              device          = device,
+                              include_weights = include_weights,
+                              n_inputs        = data_dict["n_inputs_outputs"][0],
+                              n_outputs       = data_dict["n_inputs_outputs"][1])
+
+            NO._object_name = data_dict["name"][0]
+
+            basis_function_sets = []
+
+            for i in range(NO.n_inputs):
+
+                knots         = torch.tensor(data_dict[f"knots_{i}"], device = device)
+                mults         = torch.tensor(data_dict[f"mults_{i}"], device = device)
+                degree        = data_dict["degrees"][i]
+                is_open       = data_dict["is_open"][i]
+                is_equispaced = data_dict["is_equispaced"][i]
+
+                kv = basis_functions.Knot_vector(knots,
+                                                 multiplicities = mults,
+                                                 degree         = degree,
+                                                 is_open        = is_open,
+                                                 is_equispaced  = is_equispaced)
+
+                basis_function_sets.append(basis_functions.Basis_functions(kv))
+
+            control_point_coord_sets = [torch.tensor(data_dict["control_points"][i], device = device) for i in range(NO.n_outputs)]
+
+            NO.set_parameters(basis_function_sets      = basis_function_sets,
+                              control_point_coord_sets = control_point_coord_sets)
+
+            if include_weights:
+                NO.set_parameters(weights = torch.tensor(data_dict["weights"], device = device))
+        
+        return NO
+        
+        
 class Curve(NURBS_object):
     
     def __init__(self,
